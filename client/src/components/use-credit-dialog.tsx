@@ -1,8 +1,9 @@
+
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { X, Plus, Search, Package, Scan, Clock } from "lucide-react";
+import { X, Plus, Search, Package, Clock } from "lucide-react";
 import { format } from "date-fns";
 import {
   Dialog,
@@ -38,8 +39,7 @@ import {
 } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import { insertOrderSchema, type Product, type InsertOrder } from "@shared/schema";
-import { QRScannerDialog } from "./qr-scanner-dialog";
+import { insertOrderSchema, type Product, type InsertOrder, type DiscountCode, type OrderWithItems } from "@shared/schema";
 
 interface OrderItem {
   productId: string;
@@ -50,27 +50,25 @@ interface OrderItem {
   subtotal: string;
 }
 
-interface CreateOrderDialogProps {
+interface UseCreditDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  initialProduct?: Product | null;
+  credit: DiscountCode | null;
 }
 
-export function CreateOrderDialog({ open, onOpenChange, initialProduct }: CreateOrderDialogProps) {
+export function UseCreditDialog({ open, onOpenChange, credit }: UseCreditDialogProps) {
   const [orderItems, setOrderItems] = useState<OrderItem[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [scannerOpen, setScannerOpen] = useState(false);
+  const [additionalPayment, setAdditionalPayment] = useState("0");
   const { toast } = useToast();
-
-  // Auto-add scanned product
-  useEffect(() => {
-    if (initialProduct && open) {
-      addProduct(initialProduct);
-    }
-  }, [initialProduct, open]);
 
   const { data: products = [] } = useQuery<Product[]>({
     queryKey: ["/api/products"],
+  });
+
+  const { data: previousOrders = [] } = useQuery<OrderWithItems[]>({
+    queryKey: ["/api/orders/customer", credit?.customerEmail],
+    enabled: !!credit?.customerEmail,
   });
 
   const form = useForm<InsertOrder>({
@@ -85,19 +83,62 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
     },
   });
 
+  // Pre-fill customer details when credit is selected
+  useEffect(() => {
+    if (credit && open) {
+      form.setValue("customerEmail", credit.customerEmail);
+      form.setValue("notes", `Store credit code: ${credit.code}`);
+      
+      if (previousOrders.length > 0) {
+        const mostRecentOrder = previousOrders.sort(
+          (a, b) => new Date(b.createdAt!).getTime() - new Date(a.createdAt!).getTime()
+        )[0];
+        
+        form.setValue("customerName", mostRecentOrder.customerName);
+        if (mostRecentOrder.customerPhone) {
+          form.setValue("customerPhone", mostRecentOrder.customerPhone);
+        }
+        form.setValue("status", mostRecentOrder.status as "pending" | "processing" | "shipped" | "delivered" | "cancelled");
+      }
+    }
+  }, [credit, open, previousOrders]);
+
   const createMutation = useMutation({
-    mutationFn: async (data: InsertOrder & { items: OrderItem[] }) => {
+    mutationFn: async (data: InsertOrder & { items: OrderItem[]; creditCode: string; amountUsed: string }) => {
       return await apiRequest("POST", "/api/orders", data);
     },
-    onSuccess: () => {
+    onSuccess: async (data, variables) => {
+      if (credit) {
+        try {
+          const response = await apiRequest("POST", `/api/discount-codes/${credit.code}/use`, {
+            amountUsed: variables.amountUsed,
+          }) as { success: boolean; remainingCredit: DiscountCode | null; fullyUsed: boolean };
+          
+          if (response.remainingCredit) {
+            toast({
+              title: "Success",
+              description: `Order created successfully. Remaining credit: $${response.remainingCredit.amount}`,
+            });
+          } else if (response.fullyUsed) {
+            toast({
+              title: "Success",
+              description: "Order created successfully. Store credit fully used.",
+            });
+          }
+        } catch (error) {
+          toast({
+            title: "Warning",
+            description: "Order created but failed to update store credit. Please check store credits page.",
+            variant: "destructive",
+          });
+        }
+      }
       queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
-      toast({
-        title: "Success",
-        description: "Order created successfully",
-      });
+      queryClient.invalidateQueries({ queryKey: ["/api/discount-codes"] });
       onOpenChange(false);
       form.reset();
       setOrderItems([]);
+      setAdditionalPayment("0");
     },
     onError: () => {
       toast({
@@ -157,6 +198,20 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
     return orderItems.reduce((sum, item) => sum + parseFloat(item.subtotal), 0).toFixed(2);
   };
 
+  const calculatePaymentBreakdown = () => {
+    const orderTotal = parseFloat(calculateTotal());
+    const creditAmount = credit ? parseFloat(credit.amount) : 0;
+    const remaining = Math.max(0, orderTotal - creditAmount);
+    const creditUsed = Math.min(orderTotal, creditAmount);
+    
+    return {
+      orderTotal,
+      creditAmount,
+      creditUsed,
+      additionalRequired: remaining,
+    };
+  };
+
   const onSubmit = (data: InsertOrder) => {
     if (orderItems.length === 0) {
       toast({
@@ -167,25 +222,70 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
       return;
     }
 
+    if (!credit) {
+      toast({
+        title: "Error",
+        description: "No store credit selected",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const breakdown = calculatePaymentBreakdown();
+    const additionalPaid = parseFloat(additionalPayment);
+
+    if (additionalPaid < breakdown.additionalRequired) {
+      toast({
+        title: "Insufficient Payment",
+        description: `Please pay the remaining amount of $${breakdown.additionalRequired.toFixed(2)}`,
+        variant: "destructive",
+      });
+      return;
+    }
+
     const total = calculateTotal();
     createMutation.mutate({
       ...data,
       totalAmount: total,
       items: orderItems,
+      creditCode: credit.code,
+      amountUsed: breakdown.creditUsed.toFixed(2),
     });
   };
 
+  const breakdown = calculatePaymentBreakdown();
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto" data-testid="dialog-create-order">
+      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="text-2xl">Create New Order</DialogTitle>
+          <DialogTitle className="text-2xl">Use Store Credit</DialogTitle>
           <DialogDescription>
-            Fill in customer details and add products to create a new order
+            Create a new order using store credit {credit?.code}
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+          {/* Credit Info */}
+          {credit && (
+            <Card className="bg-green-50 border-green-200">
+              <CardContent className="p-4">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <p className="text-sm text-muted-foreground">Available Store Credit</p>
+                    <p className="text-2xl font-bold text-green-600">
+                      ${parseFloat(credit.amount).toFixed(2)}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm text-muted-foreground">Code</p>
+                    <code className="text-sm font-mono">{credit.code}</code>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           <div className="space-y-4">
             <h3 className="font-semibold text-lg">Customer Information</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -195,7 +295,6 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
                   id="customerName"
                   {...form.register("customerName")}
                   placeholder="John Doe"
-                  data-testid="input-customer-name"
                 />
                 {form.formState.errors.customerName && (
                   <p className="text-sm text-destructive">{form.formState.errors.customerName.message}</p>
@@ -203,13 +302,13 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="customerEmail">Email</Label>
+                <Label htmlFor="customerEmail">Email (Pre-filled)</Label>
                 <Input
                   id="customerEmail"
                   {...form.register("customerEmail")}
                   type="email"
-                  placeholder="john@example.com"
-                  data-testid="input-customer-email"
+                  readOnly
+                  className="bg-muted"
                 />
               </div>
 
@@ -219,7 +318,6 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
                   id="customerPhone"
                   {...form.register("customerPhone")}
                   placeholder="+1 234 567 8900"
-                  data-testid="input-customer-phone"
                 />
               </div>
 
@@ -229,7 +327,7 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
                   value={form.watch("status")}
                   onValueChange={(value) => form.setValue("status", value as any)}
                 >
-                  <SelectTrigger id="status" data-testid="select-status">
+                  <SelectTrigger id="status">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -247,61 +345,49 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-lg">Products</h3>
-              <div className="flex gap-2">
-                <Button 
-                  type="button" 
-                  variant="outline" 
-                  onClick={() => setScannerOpen(true)}
-                  data-testid="button-scan-product"
-                >
-                  <Scan className="h-4 w-4 mr-2" />
-                  Scan Product
-                </Button>
-                <Popover open={searchOpen} onOpenChange={setSearchOpen}>
-                  <PopoverTrigger asChild>
-                    <Button type="button" variant="outline" data-testid="button-add-product">
-                      <Plus className="h-4 w-4 mr-2" />
-                      Add Product
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-[400px] p-0" align="end">
-                    <Command>
-                      <CommandInput placeholder="Search products..." />
-                      <CommandList>
-                        <CommandEmpty>No products found.</CommandEmpty>
-                        <CommandGroup>
-                          {products.map((product) => (
-                            <CommandItem
-                              key={product.id}
-                              onSelect={() => addProduct(product)}
-                              data-testid={`command-item-${product.id}`}
-                            >
-                              <div className="flex items-center gap-3 w-full">
-                                <div className="w-10 h-10 rounded bg-muted flex items-center justify-center overflow-hidden flex-shrink-0">
-                                  {product.productImage ? (
-                                    <img
-                                      src={product.productImage}
-                                      alt={product.productName}
-                                      className="w-full h-full object-cover"
-                                    />
-                                  ) : (
-                                    <Package className="h-5 w-5 text-muted-foreground" />
-                                  )}
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <p className="font-medium truncate">{product.productName}</p>
-                                  <p className="text-xs text-muted-foreground">{product.sku}</p>
-                                </div>
-                                <p className="font-semibold">${product.price}</p>
+              <Popover open={searchOpen} onOpenChange={setSearchOpen}>
+                <PopoverTrigger asChild>
+                  <Button type="button" variant="outline">
+                    <Plus className="h-4 w-4 mr-2" />
+                    Add Product
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[400px] p-0" align="end">
+                  <Command>
+                    <CommandInput placeholder="Search products..." />
+                    <CommandList>
+                      <CommandEmpty>No products found.</CommandEmpty>
+                      <CommandGroup>
+                        {products.map((product) => (
+                          <CommandItem
+                            key={product.id}
+                            onSelect={() => addProduct(product)}
+                          >
+                            <div className="flex items-center gap-3 w-full">
+                              <div className="w-10 h-10 rounded bg-muted flex items-center justify-center overflow-hidden flex-shrink-0">
+                                {product.productImage ? (
+                                  <img
+                                    src={product.productImage}
+                                    alt={product.productName}
+                                    className="w-full h-full object-cover"
+                                  />
+                                ) : (
+                                  <Package className="h-5 w-5 text-muted-foreground" />
+                                )}
                               </div>
-                            </CommandItem>
-                          ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
-              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="font-medium truncate">{product.productName}</p>
+                                <p className="text-xs text-muted-foreground">{product.sku}</p>
+                              </div>
+                              <p className="font-semibold">${product.price}</p>
+                            </div>
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
             </div>
 
             {orderItems.length === 0 ? (
@@ -310,7 +396,7 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
                   <div className="rounded-full bg-muted p-6 mb-4">
                     <Package className="h-10 w-10 text-muted-foreground" />
                   </div>
-                  <p className="text-sm text-muted-foreground" data-testid="text-no-items">
+                  <p className="text-sm text-muted-foreground">
                     No products added yet
                   </p>
                 </CardContent>
@@ -319,8 +405,8 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
               <Card>
                 <CardContent className="p-0">
                   <div className="divide-y">
-                    {orderItems.map((item, index) => (
-                      <div key={item.productId} className="p-4" data-testid={`order-item-${index}`}>
+                    {orderItems.map((item) => (
+                      <div key={item.productId} className="p-4">
                         <div className="flex items-center gap-4">
                           <div className="flex-1 min-w-0">
                             <p className="font-medium">{item.productName}</p>
@@ -334,11 +420,10 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
                                 size="icon"
                                 className="h-8 w-8"
                                 onClick={() => updateQuantity(item.productId, item.quantity - 1)}
-                                data-testid={`button-decrease-qty-${index}`}
                               >
                                 -
                               </Button>
-                              <span className="w-12 text-center font-medium" data-testid={`text-qty-${index}`}>
+                              <span className="w-12 text-center font-medium">
                                 {item.quantity}
                               </span>
                               <Button
@@ -347,12 +432,11 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
                                 size="icon"
                                 className="h-8 w-8"
                                 onClick={() => updateQuantity(item.productId, item.quantity + 1)}
-                                data-testid={`button-increase-qty-${index}`}
                               >
                                 +
                               </Button>
                             </div>
-                            <p className="font-semibold w-20 text-right" data-testid={`text-subtotal-${index}`}>
+                            <p className="font-semibold w-20 text-right">
                               ${item.subtotal}
                             </p>
                             <Button
@@ -360,7 +444,6 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
                               variant="ghost"
                               size="icon"
                               onClick={() => removeItem(item.productId)}
-                              data-testid={`button-remove-item-${index}`}
                             >
                               <X className="h-4 w-4" />
                             </Button>
@@ -369,16 +452,44 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
                       </div>
                     ))}
                   </div>
-                  <div className="p-4 bg-muted/50 border-t flex items-center justify-between">
-                    <p className="font-semibold text-lg">Total</p>
-                    <p className="font-bold text-2xl" data-testid="text-order-total">
-                      ${calculateTotal()}
-                    </p>
+                  <div className="p-4 bg-muted/50 border-t space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span>Order Total:</span>
+                      <span className="font-semibold">${breakdown.orderTotal.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between text-sm text-green-600">
+                      <span>Store Credit Applied:</span>
+                      <span className="font-semibold">-${breakdown.creditUsed.toFixed(2)}</span>
+                    </div>
+                    <div className="border-t pt-2 flex justify-between">
+                      <span className="font-semibold">Additional Payment Required:</span>
+                      <span className="font-bold text-lg text-red-600">
+                        ${breakdown.additionalRequired.toFixed(2)}
+                      </span>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
             )}
           </div>
+
+          {breakdown.additionalRequired > 0 && (
+            <div className="space-y-2">
+              <Label htmlFor="additionalPayment">Additional Payment Amount *</Label>
+              <Input
+                id="additionalPayment"
+                type="number"
+                step="0.01"
+                min="0"
+                value={additionalPayment}
+                onChange={(e) => setAdditionalPayment(e.target.value)}
+                placeholder="0.00"
+              />
+              <p className="text-sm text-muted-foreground">
+                Enter the additional payment amount to complete this order
+              </p>
+            </div>
+          )}
 
           <div className="space-y-2">
             <Label htmlFor="notes">Order Notes</Label>
@@ -387,7 +498,6 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
               {...form.register("notes")}
               placeholder="Add any special instructions or notes..."
               rows={3}
-              data-testid="input-notes"
             />
           </div>
 
@@ -404,32 +514,22 @@ export function CreateOrderDialog({ open, onOpenChange, initialProduct }: Create
                   onOpenChange(false);
                   form.reset();
                   setOrderItems([]);
+                  setAdditionalPayment("0");
                 }}
                 disabled={createMutation.isPending}
-                data-testid="button-cancel"
               >
                 Cancel
               </Button>
               <Button
                 type="submit"
                 disabled={createMutation.isPending || orderItems.length === 0}
-                data-testid="button-submit"
               >
-                {createMutation.isPending ? "Creating..." : "Create Order"}
+                {createMutation.isPending ? "Creating..." : "Create Order & Use Credit"}
               </Button>
             </div>
           </div>
         </form>
       </DialogContent>
-
-      <QRScannerDialog 
-        open={scannerOpen} 
-        onOpenChange={setScannerOpen}
-        onProductScanned={(product) => {
-          addProduct(product);
-          setScannerOpen(false);
-        }}
-      />
     </Dialog>
   );
 }

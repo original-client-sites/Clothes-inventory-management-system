@@ -2,7 +2,8 @@ import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Package, TrendingUp, TrendingDown, RefreshCw } from "lucide-react";
+import { Package, TrendingUp, TrendingDown, RefreshCw, Clock } from "lucide-react";
+import { format } from "date-fns";
 import {
   Dialog,
   DialogContent,
@@ -232,26 +233,32 @@ export function StockMovementDialog({ open, onOpenChange, product }: StockMoveme
             />
           </div>
 
-          <div className="flex justify-end gap-3 pt-6 border-t">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => {
-                onOpenChange(false);
-                form.reset();
-              }}
-              disabled={createMutation.isPending}
-              data-testid="button-cancel"
-            >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              disabled={createMutation.isPending}
-              data-testid="button-submit"
-            >
-              {createMutation.isPending ? "Recording..." : "Record Movement"}
-            </Button>
+          <div className="border-t pt-4">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground mb-4">
+              <Clock className="h-4 w-4" />
+              <span>Recorded at: {format(new Date(), "MMM dd, yyyy HH:mm:ss")}</span>
+            </div>
+            <div className="flex justify-end gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  onOpenChange(false);
+                  form.reset();
+                }}
+                disabled={createMutation.isPending}
+                data-testid="button-cancel"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={createMutation.isPending}
+                data-testid="button-submit"
+              >
+                {createMutation.isPending ? "Recording..." : "Record Movement"}
+              </Button>
+            </div>
           </div>
         </form>
       </DialogContent>

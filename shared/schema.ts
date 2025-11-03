@@ -140,6 +140,8 @@ export const returns = pgTable("returns", {
   notes: text("notes"),
   refundAmount: decimal("refund_amount", { precision: 10, scale: 2 }),
   creditAmount: decimal("credit_amount", { precision: 10, scale: 2 }),
+  exchangeValue: decimal("exchange_value", { precision: 10, scale: 2 }),
+  additionalPayment: decimal("additional_payment", { precision: 10, scale: 2 }),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -164,7 +166,10 @@ export const insertReturnSchema = createInsertSchema(returns, {
   reason: z.string().min(1, "Return reason is required"),
 }).omit({ id: true, createdAt: true, returnNumber: true });
 
-export const insertReturnItemSchema = createInsertSchema(returnItems).omit({ 
+export const insertReturnItemSchema = createInsertSchema(returnItems, {
+  exchangeProductId: z.string().optional().or(z.literal("")),
+  exchangeProductName: z.string().optional().or(z.literal("")),
+}).omit({ 
   id: true, 
   returnId: true 
 });

@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { format } from "date-fns";
-import { Calendar, Package, User, Mail, Phone, Download, RotateCcw } from "lucide-react";
+import { Calendar, Package, User, Mail, Phone, Download, RotateCcw, FileText } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { CreateReturnDialog } from "./create-return-dialog";
-import type { OrderWithItems } from "@shared/schema";
+import { useQuery } from "@tanstack/react-query";
+import type { OrderWithItems, ReturnWithItems } from "@shared/schema";
 
 interface OrderCardProps {
   order: OrderWithItems;
@@ -23,6 +24,12 @@ const statusVariants = {
 export function OrderCard({ order }: OrderCardProps) {
   const [returnDialogOpen, setReturnDialogOpen] = useState(false);
   const { toast } = useToast();
+
+  const { data: returns = [] } = useQuery<ReturnWithItems[]>({
+    queryKey: ["/api/returns"],
+  });
+
+  const orderReturns = returns.filter(ret => ret.orderId === order.id);
 
   const downloadInvoice = async () => {
     try {
@@ -47,6 +54,34 @@ export function OrderCard({ order }: OrderCardProps) {
       toast({
         title: "Error",
         description: "Failed to download invoice",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const downloadReturnInvoice = async (returnId: string, returnNumber: string) => {
+    try {
+      const response = await fetch(`/api/returns/${returnId}/invoice`);
+      if (!response.ok) throw new Error('Failed to download return invoice');
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `return-invoice-${returnNumber}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+
+      toast({
+        title: "Success",
+        description: "Return invoice downloaded successfully",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to download return invoice",
         variant: "destructive",
       });
     }
@@ -147,6 +182,71 @@ export function OrderCard({ order }: OrderCardProps) {
           <div className="mt-4 pt-4 border-t">
             <p className="text-sm font-medium mb-1">Notes:</p>
             <p className="text-sm text-muted-foreground" data-testid={`text-notes-${order.id}`}>{order.notes}</p>
+          </div>
+        )}
+
+        {orderReturns.length > 0 && (
+          <div className="mt-4 pt-4 border-t">
+            <p className="text-sm font-medium mb-3">Return/Exchange History:</p>
+            <div className="space-y-3">
+              {orderReturns.map((ret) => (
+                <div key={ret.id} className="bg-muted/50 p-3 rounded-lg space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-sm font-medium">{ret.returnNumber}</span>
+                      <Badge variant="outline" className="text-xs">
+                        {ret.status}
+                      </Badge>
+                    </div>
+                    <span className="text-xs text-muted-foreground">
+                      {format(new Date(ret.createdAt), "MMM dd, yyyy")}
+                    </span>
+                  </div>
+                  <div className="space-y-1 text-sm">
+                    {ret.items.map((item) => (
+                      <div key={item.id} className="flex justify-between items-start">
+                        <div className="flex-1">
+                          <span className="text-muted-foreground">Returned: </span>
+                          <span>{item.productName} (x{item.quantity})</span>
+                          {item.exchangeProductName && (
+                            <div className="ml-2 text-xs text-blue-600">
+                              ↻ Exchanged for: {item.exchangeProductName}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex justify-between items-center pt-2 border-t border-border/50 text-sm">
+                    <div className="space-y-1">
+                      {ret.exchangeValue && parseFloat(ret.exchangeValue) > 0 && (
+                        <div className="text-muted-foreground">
+                          Exchange Value: <span className="font-medium">${ret.exchangeValue}</span>
+                        </div>
+                      )}
+                      {ret.refundAmount && parseFloat(ret.refundAmount) > 0 && (
+                        <div className="text-green-600">
+                          Refunded: <span className="font-semibold">${ret.refundAmount}</span>
+                        </div>
+                      )}
+                      {ret.additionalPayment && parseFloat(ret.additionalPayment) > 0 && (
+                        <div className="text-orange-600">
+                          Additional Payment: <span className="font-semibold">${ret.additionalPayment}</span>
+                        </div>
+                      )}
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => downloadReturnInvoice(ret.id, ret.returnNumber)}
+                    >
+                      <FileText className="h-4 w-4 mr-2" />
+                      Invoice
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </CardContent>

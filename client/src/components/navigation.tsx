@@ -1,4 +1,4 @@
-import { Package, ShoppingCart, TrendingUp } from "lucide-react";
+import { Package, ShoppingCart, TrendingUp, Ticket } from "lucide-react";
 import { Link, useRoute } from "wouter";
 import { cn } from "@/lib/utils";
 
@@ -6,6 +6,7 @@ export function Navigation() {
   const [isInventory] = useRoute("/");
   const [isOrders] = useRoute("/orders");
   const [isStock] = useRoute("/stock-history");
+  const [isStoreCredits] = useRoute("/store-credits");
 
   return (
     <nav className="border-b bg-background">
@@ -14,13 +15,13 @@ export function Navigation() {
           <div className="flex items-center gap-8">
             <div className="flex items-center gap-2">
               <Package className="h-6 w-6 text-primary" />
-              <span className="text-xl font-bold">Inventory Manager</span>
+              <span className="text-xl font-bold">FABRIX</span>
             </div>
             <div className="flex gap-1">
               <Link href="/">
-                <a
+                <div
                   className={cn(
-                    "flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors",
+                    "flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors cursor-pointer",
                     isInventory
                       ? "bg-primary text-primary-foreground"
                       : "text-muted-foreground hover:text-foreground hover:bg-muted"
@@ -28,12 +29,12 @@ export function Navigation() {
                 >
                   <Package className="h-4 w-4" />
                   <span>Inventory</span>
-                </a>
+                </div>
               </Link>
               <Link href="/orders">
-                <a
+                <div
                   className={cn(
-                    "flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors",
+                    "flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors cursor-pointer",
                     isOrders
                       ? "bg-primary text-primary-foreground"
                       : "text-muted-foreground hover:text-foreground hover:bg-muted"
@@ -41,12 +42,12 @@ export function Navigation() {
                 >
                   <ShoppingCart className="h-4 w-4" />
                   <span>Orders</span>
-                </a>
+                </div>
               </Link>
               <Link href="/stock-history">
-                <a
+                <div
                   className={cn(
-                    "flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors",
+                    "flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors cursor-pointer",
                     isStock
                       ? "bg-primary text-primary-foreground"
                       : "text-muted-foreground hover:text-foreground hover:bg-muted"
@@ -54,7 +55,20 @@ export function Navigation() {
                 >
                   <TrendingUp className="h-4 w-4" />
                   <span>Stock History</span>
-                </a>
+                </div>
+              </Link>
+              <Link href="/store-credits">
+                <div
+                  className={cn(
+                    "flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors cursor-pointer",
+                    isStoreCredits
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                  )}
+                >
+                  <Ticket className="h-4 w-4" />
+                  <span>Store Credits</span>
+                </div>
               </Link>
             </div>
           </div>

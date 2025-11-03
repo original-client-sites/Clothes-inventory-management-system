@@ -25,7 +25,7 @@ import { StockMovementDialog } from "@/components/stock-movement-dialog";
 import type { StockMovement, Product } from "@shared/schema";
 import { format } from "date-fns";
 
-type SortField = "productName" | "sku" | "category" | "available" | "purchased" | "sold";
+type SortField = "productName" | "sku" | "category" | "available" | "sold" | "returned";
 type SortOrder = "asc" | "desc";
 
 export default function StockHistory() {
@@ -44,14 +44,22 @@ export default function StockHistory() {
     queryKey: ["/api/products"],
   });
 
+  const { data: orders = [] } = useQuery<any[]>({
+    queryKey: ["/api/orders"],
+  });
+
+  const { data: returns = [] } = useQuery<any[]>({
+    queryKey: ["/api/returns"],
+  });
+
   // Calculate statistics
   const statistics = useMemo(() => {
-    const totalPurchased = movements
-      .filter(m => m.type === "in")
+    const totalSold = movements
+      .filter(m => m.type === "out" && m.reason === "sale")
       .reduce((sum, m) => sum + m.quantity, 0);
     
-    const totalSold = movements
-      .filter(m => m.type === "out")
+    const totalReturned = movements
+      .filter(m => m.type === "in" && m.reason === "return")
       .reduce((sum, m) => sum + m.quantity, 0);
     
     const totalAvailable = products.reduce((sum, p) => sum + p.stockQuantity, 0);
@@ -59,25 +67,25 @@ export default function StockHistory() {
     return {
       available: totalAvailable,
       sold: totalSold,
-      purchased: totalPurchased,
+      returned: totalReturned,
     };
   }, [movements, products]);
 
   // Calculate per-product statistics
   const productStats = useMemo(() => {
     return products.map(product => {
-      const purchased = movements
-        .filter(m => m.productId === product.id && m.type === "in")
+      const sold = movements
+        .filter(m => m.productId === product.id && m.type === "out" && m.reason === "sale")
         .reduce((sum, m) => sum + m.quantity, 0);
       
-      const sold = movements
-        .filter(m => m.productId === product.id && m.type === "out")
+      const returned = movements
+        .filter(m => m.productId === product.id && m.type === "in" && m.reason === "return")
         .reduce((sum, m) => sum + m.quantity, 0);
 
       return {
         ...product,
-        purchased,
         sold,
+        returned,
         available: product.stockQuantity,
       };
     });
@@ -87,6 +95,40 @@ export default function StockHistory() {
   const categories = useMemo(() => {
     return ["all", ...new Set(products.map(p => p.category))];
   }, [products]);
+
+  // Group orders with their returns
+  const groupedTransactions = useMemo(() => {
+    const transactions: any[] = [];
+
+    // Add all orders
+    orders.forEach(order => {
+      const orderReturns = returns.filter(ret => ret.orderId === order.id);
+      transactions.push({
+        type: 'order',
+        data: order,
+        returns: orderReturns,
+        date: order.createdAt,
+      });
+    });
+
+    // Add standalone returns (if any without order)
+    returns.forEach(ret => {
+      if (!ret.orderId) {
+        transactions.push({
+          type: 'return',
+          data: ret,
+          returns: [],
+          date: ret.createdAt,
+        });
+      }
+    });
+
+    return transactions.sort((a, b) => {
+      const dateA = new Date(a.date).getTime();
+      const dateB = new Date(b.date).getTime();
+      return dateB - dateA;
+    });
+  }, [orders, returns]);
 
   // Filter and sort products
   const filteredAndSortedProducts = useMemo(() => {
@@ -119,13 +161,13 @@ export default function StockHistory() {
           aValue = a.available;
           bValue = b.available;
           break;
-        case "purchased":
-          aValue = a.purchased;
-          bValue = b.purchased;
-          break;
         case "sold":
           aValue = a.sold;
           bValue = b.sold;
+          break;
+        case "returned":
+          aValue = a.returned;
+          bValue = b.returned;
           break;
         default:
           aValue = a.productName.toLowerCase();
@@ -245,16 +287,16 @@ export default function StockHistory() {
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                 <CardTitle className="text-sm font-medium">
-                  Total Purchased
+                  Total Returned
                 </CardTitle>
-                <Truck className="h-4 w-4 text-green-600" />
+                <RefreshCw className="h-4 w-4 text-blue-600" />
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold text-green-600" data-testid="stat-purchased">
-                  {statistics.purchased.toLocaleString()}
+                <div className="text-2xl font-bold text-blue-600" data-testid="stat-returned">
+                  {statistics.returned.toLocaleString()}
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Units added to inventory
+                  Units returned to inventory
                 </p>
               </CardContent>
             </Card>
@@ -347,21 +389,21 @@ export default function StockHistory() {
                       <TableHead className="text-right">
                         <Button
                           variant="ghost"
-                          onClick={() => handleSort("purchased")}
-                          className="hover:bg-transparent p-0 h-auto font-medium ml-auto flex"
-                        >
-                          Purchased
-                          <SortIcon field="purchased" />
-                        </Button>
-                      </TableHead>
-                      <TableHead className="text-right">
-                        <Button
-                          variant="ghost"
                           onClick={() => handleSort("sold")}
                           className="hover:bg-transparent p-0 h-auto font-medium ml-auto flex"
                         >
                           Sold
                           <SortIcon field="sold" />
+                        </Button>
+                      </TableHead>
+                      <TableHead className="text-right">
+                        <Button
+                          variant="ghost"
+                          onClick={() => handleSort("returned")}
+                          className="hover:bg-transparent p-0 h-auto font-medium ml-auto flex"
+                        >
+                          Returned
+                          <SortIcon field="returned" />
                         </Button>
                       </TableHead>
                     </TableRow>
@@ -393,10 +435,10 @@ export default function StockHistory() {
                             </span>
                           </TableCell>
                           <TableCell className="text-right">
-                            <span className="text-green-600 font-semibold">{product.purchased}</span>
+                            <span className="text-red-600 font-semibold">{product.sold}</span>
                           </TableCell>
                           <TableCell className="text-right">
-                            <span className="text-red-600 font-semibold">{product.sold}</span>
+                            <span className="text-blue-600 font-semibold">{product.returned}</span>
                           </TableCell>
                         </TableRow>
                       ))
@@ -409,9 +451,9 @@ export default function StockHistory() {
 
           {/* Stock Movement History */}
           <div className="mb-4">
-            <h2 className="text-xl font-semibold mb-2">Movement History</h2>
+            <h2 className="text-xl font-semibold mb-2">Order & Return History</h2>
             <p className="text-sm text-muted-foreground" data-testid="text-movement-count">
-              {movements.length} {movements.length === 1 ? "movement" : "movements"}
+              {groupedTransactions.length} {groupedTransactions.length === 1 ? "transaction" : "transactions"}
             </p>
           </div>
 
@@ -425,77 +467,189 @@ export default function StockHistory() {
                 </Card>
               ))}
             </div>
-          ) : movements.length === 0 ? (
+          ) : groupedTransactions.length === 0 ? (
             <Card className="border-dashed">
               <CardContent className="flex flex-col items-center justify-center py-16 text-center">
                 <div className="rounded-full bg-muted p-6 mb-4">
-                  <TrendingUp className="h-10 w-10 text-muted-foreground" />
+                  <ShoppingCart className="h-10 w-10 text-muted-foreground" />
                 </div>
                 <h3 className="text-lg font-semibold mb-2" data-testid="text-empty-state">
-                  No stock movements yet
+                  No transactions yet
                 </h3>
                 <p className="text-sm text-muted-foreground">
-                  Stock movements will appear here as you manage your inventory
+                  Orders and returns will appear here as you manage your inventory
                 </p>
               </CardContent>
             </Card>
           ) : (
             <div className="flex flex-col gap-4">
-              {movements.map((movement) => (
-                <Card key={movement.id} className="hover-elevate" data-testid={`card-movement-${movement.id}`}>
-                  <CardContent className="p-6">
-                    <div className="flex items-start gap-4">
-                      <div className="rounded-lg bg-muted p-3 flex items-center justify-center flex-shrink-0">
-                        {getIcon(movement.type)}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-start justify-between gap-4 mb-2">
+              {groupedTransactions.map((transaction, idx) => {
+                const isOrder = transaction.type === 'order';
+                const order = isOrder ? transaction.data : null;
+                const returnData = !isOrder ? transaction.data : null;
+                
+                return (
+                  <Card key={`${transaction.type}-${isOrder ? order?.id : returnData?.id}-${idx}`} className="hover-elevate">
+                    <CardContent className="p-6">
+                      {isOrder && order ? (
+                        <div className="space-y-4">
+                          <div className="flex items-start gap-4">
+                            <div className="rounded-lg bg-muted p-3 flex items-center justify-center flex-shrink-0">
+                              <ShoppingCart className="h-5 w-5 text-blue-600" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-start justify-between gap-4 mb-2">
+                                <div className="flex-1 min-w-0">
+                                  <h3 className="font-semibold text-lg">
+                                    Order {order.orderNumber}
+                                  </h3>
+                                  <p className="text-sm text-muted-foreground">
+                                    Customer: {order.customerName}
+                                  </p>
+                                </div>
+                                <Badge variant="default">
+                                  Order
+                                </Badge>
+                              </div>
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+                                <div>
+                                  <p className="text-sm text-muted-foreground">Total Items</p>
+                                  <p className="font-semibold">
+                                    {order.items?.reduce((sum: number, item: any) => sum + item.quantity, 0) || 0} units
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-sm text-muted-foreground">Status</p>
+                                  <p className="font-semibold capitalize">{order.status}</p>
+                                </div>
+                                <div>
+                                  <p className="text-sm text-muted-foreground">Date</p>
+                                  <p className="font-semibold">
+                                    {order.createdAt && format(new Date(order.createdAt), "MMM dd, yyyy HH:mm")}
+                                  </p>
+                                </div>
+                              </div>
+                              {order.items && order.items.length > 0 && (
+                                <div className="mt-3 pt-3 border-t">
+                                  <p className="text-sm text-muted-foreground mb-2">Products:</p>
+                                  <div className="space-y-1">
+                                    {order.items.map((item: any, itemIdx: number) => (
+                                      <p key={itemIdx} className="text-sm">
+                                        • {item.productName} - {item.quantity} units (SKU: {item.sku})
+                                      </p>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                          
+                          {transaction.returns.length > 0 && (
+                            <div className="ml-16 space-y-3 pt-3 border-t">
+                              <p className="text-sm font-medium text-muted-foreground">Associated Returns:</p>
+                              {transaction.returns.map((ret: any, retIdx: number) => (
+                                <div key={retIdx} className="flex items-start gap-4 bg-muted/50 p-4 rounded-lg">
+                                  <div className="rounded-lg bg-background p-2 flex items-center justify-center flex-shrink-0">
+                                    <RefreshCw className="h-4 w-4 text-blue-600" />
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-start justify-between gap-4 mb-2">
+                                      <div className="flex-1 min-w-0">
+                                        <h4 className="font-semibold">
+                                          Return {ret.returnNumber}
+                                        </h4>
+                                        <p className="text-sm text-muted-foreground">
+                                          Reason: {ret.reason}
+                                        </p>
+                                      </div>
+                                      <Badge variant="secondary">
+                                        Return
+                                      </Badge>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
+                                      <div>
+                                        <p className="text-sm text-muted-foreground">Total Items</p>
+                                        <p className="font-semibold">
+                                          {ret.items?.reduce((sum: number, item: any) => sum + item.quantity, 0) || 0} units
+                                        </p>
+                                      </div>
+                                      <div>
+                                        <p className="text-sm text-muted-foreground">Date</p>
+                                        <p className="font-semibold">
+                                          {ret.createdAt && format(new Date(ret.createdAt), "MMM dd, yyyy HH:mm")}
+                                        </p>
+                                      </div>
+                                    </div>
+                                    {ret.items && ret.items.length > 0 && (
+                                      <div className="mt-2">
+                                        <p className="text-sm text-muted-foreground mb-1">Products:</p>
+                                        <div className="space-y-1">
+                                          {ret.items.map((item: any, itemIdx: number) => (
+                                            <p key={itemIdx} className="text-sm">
+                                              • {item.productName} - {item.quantity} units (SKU: {item.sku})
+                                            </p>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : returnData ? (
+                        <div className="flex items-start gap-4">
+                          <div className="rounded-lg bg-muted p-3 flex items-center justify-center flex-shrink-0">
+                            <RefreshCw className="h-5 w-5 text-blue-600" />
+                          </div>
                           <div className="flex-1 min-w-0">
-                            <h3 className="font-semibold text-lg" data-testid={`text-product-${movement.id}`}>
-                              {movement.productName}
-                            </h3>
-                            <p className="text-sm text-muted-foreground font-mono">
-                              SKU: {movement.sku}
-                            </p>
+                            <div className="flex items-start justify-between gap-4 mb-2">
+                              <div className="flex-1 min-w-0">
+                                <h3 className="font-semibold text-lg">
+                                  Return {returnData.returnNumber}
+                                </h3>
+                                <p className="text-sm text-muted-foreground">
+                                  Reason: {returnData.reason}
+                                </p>
+                              </div>
+                              <Badge variant="secondary">
+                                Standalone Return
+                              </Badge>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                              <div>
+                                <p className="text-sm text-muted-foreground">Total Items</p>
+                                <p className="font-semibold">
+                                  {returnData.items?.reduce((sum: number, item: any) => sum + item.quantity, 0) || 0} units
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-sm text-muted-foreground">Date</p>
+                                <p className="font-semibold">
+                                  {returnData.createdAt && format(new Date(returnData.createdAt), "MMM dd, yyyy HH:mm")}
+                                </p>
+                              </div>
+                            </div>
+                            {returnData.items && returnData.items.length > 0 && (
+                              <div className="mt-3 pt-3 border-t">
+                                <p className="text-sm text-muted-foreground mb-2">Products:</p>
+                                <div className="space-y-1">
+                                  {returnData.items.map((item: any, itemIdx: number) => (
+                                    <p key={itemIdx} className="text-sm">
+                                      • {item.productName} - {item.quantity} units (SKU: {item.sku})
+                                    </p>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
                           </div>
-                          <Badge variant={getBadgeVariant(movement.type)} data-testid={`badge-type-${movement.id}`}>
-                            {movement.type.charAt(0).toUpperCase() + movement.type.slice(1)}
-                          </Badge>
                         </div>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
-                          <div>
-                            <p className="text-sm text-muted-foreground">Quantity</p>
-                            <p className="font-semibold" data-testid={`text-quantity-${movement.id}`}>
-                              {movement.type === "adjustment" ? "Set to " : ""}
-                              {movement.quantity} units
-                            </p>
-                          </div>
-                          <div>
-                            <p className="text-sm text-muted-foreground">Reason</p>
-                            <p className="font-semibold" data-testid={`text-reason-${movement.id}`}>
-                              {movement.reason}
-                            </p>
-                          </div>
-                          <div>
-                            <p className="text-sm text-muted-foreground">Date</p>
-                            <p className="font-semibold" data-testid={`text-date-${movement.id}`}>
-                              {movement.createdAt && format(new Date(movement.createdAt), "MMM dd, yyyy HH:mm")}
-                            </p>
-                          </div>
-                        </div>
-                        {movement.notes && (
-                          <div className="mt-3 pt-3 border-t">
-                            <p className="text-sm text-muted-foreground">Notes:</p>
-                            <p className="text-sm mt-1" data-testid={`text-notes-${movement.id}`}>
-                              {movement.notes}
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
+                      ) : null}
+                    </CardContent>
+                  </Card>
+                );
+              })}
             </div>
           )}
         </div>

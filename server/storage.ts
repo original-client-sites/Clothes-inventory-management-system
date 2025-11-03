@@ -40,6 +40,7 @@ export interface IStorage {
   // Orders
   getOrders(): Promise<OrderWithItems[]>;
   getOrder(id: string): Promise<OrderWithItems | undefined>;
+  getOrdersByCustomerEmail(email: string): Promise<OrderWithItems[]>;
   createOrder(order: InsertOrder, items: InsertOrderItem[]): Promise<OrderWithItems>;
   updateOrder(id: string, order: InsertOrder): Promise<Order | undefined>;
   deleteOrder(id: string): Promise<boolean>;
@@ -62,7 +63,8 @@ export interface IStorage {
   getDiscountCodes(customerEmail?: string): Promise<DiscountCode[]>;
   getDiscountCode(code: string): Promise<DiscountCode | null>;
   createDiscountCode(data: InsertDiscountCode): Promise<DiscountCode>;
-  useDiscountCode(code: string): Promise<DiscountCode | null>;
+  useDiscountCode(code: string, amountUsed: string): Promise<{ updated: DiscountCode | null; wasDeleted: boolean; wasFound: boolean; error?: string }>;
+  deleteDiscountCode(id: string): Promise<boolean>;
 }
 
 export class MemStorage implements IStorage {
@@ -70,12 +72,18 @@ export class MemStorage implements IStorage {
   private orders: Map<string, Order>;
   private orderItems: Map<string, OrderItem>;
   private stockMovements: Map<string, StockMovement>;
+  private returns: Map<string, Return>;
+  private returnItems: Map<string, ReturnItem>;
+  private discountCodes: Map<string, DiscountCode>;
 
   constructor() {
     this.products = new Map();
     this.orders = new Map();
     this.orderItems = new Map();
     this.stockMovements = new Map();
+    this.returns = new Map();
+    this.returnItems = new Map();
+    this.discountCodes = new Map();
   }
 
   // Products
@@ -141,6 +149,18 @@ export class MemStorage implements IStorage {
 
     const items = await this.getOrderItems(id);
     return { ...order, items };
+  }
+
+  async getOrdersByCustomerEmail(email: string): Promise<OrderWithItems[]> {
+    const orders = Array.from(this.orders.values()).filter(
+      (order) => order.customerEmail === email
+    );
+    return Promise.all(
+      orders.map(async (order) => {
+        const items = await this.getOrderItems(order.id);
+        return { ...order, items };
+      })
+    );
   }
 
   async createOrder(
@@ -257,13 +277,12 @@ export class MemStorage implements IStorage {
 
   // Returns
   async getReturns(): Promise<ReturnWithItems[]> {
-    const allReturns = await db.select().from(returns).execute();
+    const allReturns = Array.from(this.returns.values());
     const returnsWithItems = await Promise.all(
       allReturns.map(async (ret) => {
-        const items = await db.select()
-          .from(returnItems)
-          .where(eq(returnItems.returnId, ret.id))
-          .execute();
+        const items = Array.from(this.returnItems.values()).filter(
+          (item) => item.returnId === ret.id
+        );
         return { ...ret, items };
       })
     );
@@ -271,13 +290,12 @@ export class MemStorage implements IStorage {
   }
 
   async getReturn(id: string): Promise<ReturnWithItems | null> {
-    const [ret] = await db.select().from(returns).where(eq(returns.id, id)).execute();
+    const ret = this.returns.get(id);
     if (!ret) return null;
 
-    const items = await db.select()
-      .from(returnItems)
-      .where(eq(returnItems.returnId, id))
-      .execute();
+    const items = Array.from(this.returnItems.values()).filter(
+      (item) => item.returnId === id
+    );
 
     return { ...ret, items };
   }
@@ -286,30 +304,35 @@ export class MemStorage implements IStorage {
     const returnId = randomUUID();
     const returnNumber = `RET-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
 
-    const [newReturn] = await db.insert(returns)
-      .values({ id: returnId, returnNumber, ...data })
-      .returning()
-      .execute();
+    const newReturn: Return = {
+      id: returnId,
+      returnNumber,
+      ...data,
+      createdAt: new Date(),
+    };
 
-    const returnItemsData = items.map(item => ({
-      id: randomUUID(),
-      returnId,
-      ...item,
-    }));
+    this.returns.set(returnId, newReturn);
 
-    const createdItems = await db.insert(returnItems)
-      .values(returnItemsData)
-      .returning()
-      .execute();
+    const createdItems: ReturnItem[] = items.map(item => {
+      const itemId = randomUUID();
+      const returnItem: ReturnItem = {
+        id: itemId,
+        returnId,
+        ...item,
+      };
+      this.returnItems.set(itemId, returnItem);
+      return returnItem;
+    });
 
     // Update stock quantities for returned items
     for (const item of items) {
-      await db.update(products)
-        .set({
-          stockQuantity: sql`${products.stockQuantity} + ${item.quantity}`
-        })
-        .where(eq(products.id, item.productId))
-        .execute();
+      const product = await this.getProduct(item.productId);
+      if (product) {
+        await this.updateProduct(item.productId, {
+          ...product,
+          stockQuantity: product.stockQuantity + item.quantity,
+        });
+      }
 
       // Create stock movement
       await this.createStockMovement({
@@ -327,48 +350,87 @@ export class MemStorage implements IStorage {
   }
 
   async updateReturn(id: string, data: Partial<InsertReturn>): Promise<Return | null> {
-    const [updated] = await db.update(returns)
-      .set(data)
-      .where(eq(returns.id, id))
-      .returning()
-      .execute();
-    return updated || null;
+    const existing = this.returns.get(id);
+    if (!existing) return null;
+
+    const updated: Return = {
+      ...existing,
+      ...data,
+    };
+    this.returns.set(id, updated);
+    return updated;
   }
 
   // Discount codes
   async getDiscountCodes(customerEmail?: string): Promise<DiscountCode[]> {
+    const codes = Array.from(this.discountCodes.values());
     if (customerEmail) {
-      return db.select()
-        .from(discountCodes)
-        .where(eq(discountCodes.customerEmail, customerEmail))
-        .execute();
+      return codes.filter(code => code.customerEmail === customerEmail);
     }
-    return db.select().from(discountCodes).execute();
+    return codes;
   }
 
   async getDiscountCode(code: string): Promise<DiscountCode | null> {
-    const [discountCode] = await db.select()
-      .from(discountCodes)
-      .where(eq(discountCodes.code, code))
-      .execute();
-    return discountCode || null;
+    return Array.from(this.discountCodes.values()).find(dc => dc.code === code) || null;
   }
 
   async createDiscountCode(data: InsertDiscountCode): Promise<DiscountCode> {
-    const [discountCode] = await db.insert(discountCodes)
-      .values({ id: randomUUID(), ...data })
-      .returning()
-      .execute();
+    const id = randomUUID();
+    const discountCode: DiscountCode = {
+      id,
+      ...data,
+      isUsed: false,
+      usedAt: null,
+      createdAt: new Date(),
+    };
+    this.discountCodes.set(id, discountCode);
     return discountCode;
   }
 
-  async useDiscountCode(code: string): Promise<DiscountCode | null> {
-    const [updated] = await db.update(discountCodes)
-      .set({ isUsed: true, usedAt: new Date() })
-      .where(eq(discountCodes.code, code))
-      .returning()
-      .execute();
-    return updated || null;
+  async useDiscountCode(code: string, amountUsed: string): Promise<{ updated: DiscountCode | null; wasDeleted: boolean; wasFound: boolean; error?: string }> {
+    const discountCode = await this.getDiscountCode(code);
+    if (!discountCode) {
+      return { updated: null, wasDeleted: false, wasFound: false };
+    }
+
+    const currentAmount = parseFloat(discountCode.amount);
+    const usedAmount = parseFloat(amountUsed);
+
+    if (isNaN(usedAmount) || usedAmount <= 0) {
+      return { 
+        updated: null, 
+        wasDeleted: false, 
+        wasFound: true, 
+        error: "Amount used must be a positive number" 
+      };
+    }
+
+    if (usedAmount > currentAmount) {
+      return { 
+        updated: null, 
+        wasDeleted: false, 
+        wasFound: true, 
+        error: `Amount used ($${usedAmount.toFixed(2)}) exceeds available credit ($${currentAmount.toFixed(2)})` 
+      };
+    }
+
+    const remainingAmount = currentAmount - usedAmount;
+
+    if (remainingAmount <= 0) {
+      this.discountCodes.delete(discountCode.id);
+      return { updated: null, wasDeleted: true, wasFound: true };
+    }
+
+    const updated: DiscountCode = {
+      ...discountCode,
+      amount: remainingAmount.toFixed(2),
+    };
+    this.discountCodes.set(discountCode.id, updated);
+    return { updated, wasDeleted: false, wasFound: true };
+  }
+
+  async deleteDiscountCode(id: string): Promise<boolean> {
+    return this.discountCodes.delete(id);
   }
 }
 

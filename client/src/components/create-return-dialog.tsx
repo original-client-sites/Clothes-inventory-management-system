@@ -2,7 +2,8 @@ import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { X, Package, QrCode, Search } from "lucide-react";
+import { X, Package, QrCode, Search, Clock } from "lucide-react";
+import { format } from "date-fns";
 import {
   Dialog,
   DialogContent,
@@ -98,9 +99,12 @@ export function CreateReturnDialog({ open, onOpenChange, order }: CreateReturnDi
       queryClient.invalidateQueries({ queryKey: ["/api/returns"] });
       queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
       queryClient.invalidateQueries({ queryKey: ["/api/discount-codes"] });
+      const { credit } = calculateTotals();
       toast({
         title: "Return Created",
-        description: "Return has been created successfully. If there's store credit, a discount code has been sent to the customer's email.",
+        description: credit > 0 
+          ? `Return has been created successfully. A store credit discount code for $${credit.toFixed(2)} has been sent to the customer's email.`
+          : "Return has been created successfully.",
       });
       onOpenChange(false);
       form.reset();
@@ -158,7 +162,7 @@ export function CreateReturnDialog({ open, onOpenChange, order }: CreateReturnDi
 
   const handleManualSearch = (productId: string) => {
     if (!manualSearchSKU.trim()) return;
-    
+
     const product = products.find(p => p.sku === manualSearchSKU.trim());
     if (product) {
       setExchangeProduct(productId, product.id);
@@ -179,7 +183,7 @@ export function CreateReturnDialog({ open, onOpenChange, order }: CreateReturnDi
 
   const calculateTotals = () => {
     const itemsToReturn = returnItems.filter(item => item.quantity > 0);
-    
+
     let totalReturnValue = 0;
     let totalExchangeValue = 0;
 
@@ -195,12 +199,19 @@ export function CreateReturnDialog({ open, onOpenChange, order }: CreateReturnDi
       }
     });
 
-    const refundAmount = totalExchangeValue > 0 ? 0 : totalReturnValue;
-    const creditAmount = totalReturnValue > totalExchangeValue 
-      ? (totalReturnValue - totalExchangeValue)
-      : 0;
+    // Calculate refund or store credit for additional payment
+    const difference = totalReturnValue - totalExchangeValue;
+    const refundAmount = difference > 0 ? difference : 0;
+    // When additional payment is needed, save it as future store credit
+    const creditAmount = difference < 0 ? Math.abs(difference) : 0;
 
-    return { total: totalReturnValue, refund: refundAmount, credit: creditAmount };
+    return { 
+      total: totalReturnValue, 
+      refund: refundAmount, 
+      credit: creditAmount,
+      exchangeValue: totalExchangeValue,
+      additionalPayment: 0 // Always 0, convert to credit instead
+    };
   };
 
   const onSubmit = form.handleSubmit((data) => {
@@ -215,12 +226,14 @@ export function CreateReturnDialog({ open, onOpenChange, order }: CreateReturnDi
       return;
     }
 
-    const { refund, credit } = calculateTotals();
+    const { refund, credit, exchangeValue } = calculateTotals();
 
     createReturnMutation.mutate({
       ...data,
       refundAmount: refund.toFixed(2),
       creditAmount: credit.toFixed(2),
+      exchangeValue: exchangeValue.toFixed(2),
+      additionalPayment: "0.00",
       items: itemsToReturn,
     });
   });
@@ -403,23 +416,7 @@ export function CreateReturnDialog({ open, onOpenChange, order }: CreateReturnDi
               <CardContent className="p-4">
                 <h3 className="font-semibold mb-3">Return Summary</h3>
                 {(() => {
-                  const itemsToReturn = returnItems.filter(item => item.quantity > 0);
-                  let totalReturnValue = 0;
-                  let totalExchangeValue = 0;
-
-                  itemsToReturn.forEach(item => {
-                    totalReturnValue += parseFloat(item.subtotal);
-                    if (item.exchangeProductId) {
-                      const exchangeProduct = products.find(p => p.id === item.exchangeProductId);
-                      if (exchangeProduct) {
-                        totalExchangeValue += parseFloat(exchangeProduct.price) * item.quantity;
-                      }
-                    }
-                  });
-
-                  const creditAmount = totalReturnValue > totalExchangeValue 
-                    ? (totalReturnValue - totalExchangeValue)
-                    : 0;
+                  const { total: totalReturnValue, exchangeValue: totalExchangeValue, refund, additionalPayment } = calculateTotals();
 
                   return (
                     <div className="space-y-2 text-sm">
@@ -428,21 +425,35 @@ export function CreateReturnDialog({ open, onOpenChange, order }: CreateReturnDi
                         <span className="font-medium">${totalReturnValue.toFixed(2)}</span>
                       </div>
                       {totalExchangeValue > 0 && (
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Exchange Value:</span>
-                          <span className="font-medium">${totalExchangeValue.toFixed(2)}</span>
-                        </div>
-                      )}
-                      {creditAmount > 0 && (
-                        <div className="flex justify-between pt-2 border-t">
-                          <span className="font-semibold">Store Credit:</span>
-                          <span className="font-semibold text-green-600">${creditAmount.toFixed(2)}</span>
-                        </div>
+                        <>
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">Exchange Value:</span>
+                            <span className="font-medium">${totalExchangeValue.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between pt-2 border-t">
+                            {refund > 0 ? (
+                              <>
+                                <span className="font-semibold">Refund Amount:</span>
+                                <span className="font-semibold text-green-600">${refund.toFixed(2)}</span>
+                              </>
+                            ) : credit > 0 ? (
+                              <>
+                                <span className="font-semibold">Store Credit (Future Discount):</span>
+                                <span className="font-semibold text-blue-600">${credit.toFixed(2)}</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="font-semibold">Even Exchange:</span>
+                                <span className="font-semibold">$0.00</span>
+                              </>
+                            )}
+                          </div>
+                        </>
                       )}
                       {totalExchangeValue === 0 && (
                         <div className="flex justify-between pt-2 border-t">
                           <span className="font-semibold">Refund Amount:</span>
-                          <span className="font-semibold">${totalReturnValue.toFixed(2)}</span>
+                          <span className="font-semibold text-green-600">${totalReturnValue.toFixed(2)}</span>
                         </div>
                       )}
                     </div>
@@ -452,17 +463,30 @@ export function CreateReturnDialog({ open, onOpenChange, order }: CreateReturnDi
             </Card>
           )}
 
-          <div className="flex gap-2 justify-end">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => onOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={createReturnMutation.isPending || total === 0}>
-              {createReturnMutation.isPending ? "Creating..." : "Create Return"}
-            </Button>
+          <div className="border-t pt-4">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground mb-4">
+              <Clock className="h-4 w-4" />
+              <span>Return Date: {format(new Date(), "MMM dd, yyyy HH:mm:ss")}</span>
+            </div>
+            <div className="flex justify-end gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  onOpenChange(false);
+                  form.reset();
+                }}
+                disabled={createReturnMutation.isPending}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={createReturnMutation.isPending || total === 0}
+              >
+                {createReturnMutation.isPending ? "Creating..." : "Create Return"}
+              </Button>
+            </div>
           </div>
         </form>
       </DialogContent>

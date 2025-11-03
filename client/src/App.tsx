@@ -7,7 +7,9 @@ import Inventory from "@/pages/inventory";
 import Orders from "@/pages/orders";
 import NotFound from "@/pages/not-found";
 import StockHistory from "@/pages/stock-history";
+import StoreCredits from "@/pages/store-credits";
 import { Navigation } from "@/components/navigation";
+import { Footer } from "@/components/footer";
 
 function Router() {
   return (
@@ -15,6 +17,7 @@ function Router() {
       <Route path="/" component={Inventory} />
       <Route path="/orders" component={Orders} />
       <Route path="/stock-history" component={StockHistory} />
+      <Route path="/store-credits" component={StoreCredits} />
       <Route component={NotFound} />
     </Switch>
   );
@@ -29,6 +32,7 @@ function App() {
           <main className="flex-1 overflow-hidden">
             <Router />
           </main>
+          <Footer />
         </div>
         <Toaster />
       </TooltipProvider>

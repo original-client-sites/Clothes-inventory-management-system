@@ -193,6 +193,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.get("/api/orders/customer/:email", async (req, res) => {
+    try {
+      const orders = await storage.getOrdersByCustomerEmail(req.params.email);
+      res.json(orders);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch orders" });
+    }
+  });
+
   app.post("/api/orders", async (req, res) => {
     try {
       const { items, ...orderData } = req.body;
@@ -333,30 +342,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const ret = await storage.createReturn(parsedReturn.data, parsedItems.data);
       
-      // Generate discount code if there's credit
+      // Generate discount code if there's credit (including when exchange value > return value)
       if (ret.creditAmount && parseFloat(ret.creditAmount) > 0 && ret.customerEmail) {
-        const code = `CREDIT-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
-        const expiresAt = new Date();
-        expiresAt.setMonth(expiresAt.getMonth() + 6); // 6 months expiry
-        
-        const discountCode = await storage.createDiscountCode({
-          code,
-          customerEmail: ret.customerEmail,
-          amount: ret.creditAmount,
-          expiresAt,
-        });
-        
-        // Send email with discount code
         try {
-          const { emailService } = await import('./email-service');
-          await emailService.sendDiscountCode(
-            ret.customerEmail,
+          const code = `CREDIT-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+          const expiresAt = new Date();
+          expiresAt.setMonth(expiresAt.getMonth() + 6); // 6 months expiry
+          
+          const discountCode = await storage.createDiscountCode({
             code,
-            ret.creditAmount,
-            expiresAt
-          );
-        } catch (emailError) {
-          console.error('Failed to send discount code email:', emailError);
+            customerEmail: ret.customerEmail,
+            amount: ret.creditAmount,
+            expiresAt,
+          });
+          
+          // Send email with discount code
+          try {
+            const { emailService } = await import('./email-service');
+            await emailService.sendDiscountCode(
+              ret.customerEmail,
+              code,
+              ret.creditAmount,
+              expiresAt
+            );
+          } catch (emailError) {
+            console.error('Failed to send discount code email:', emailError);
+          }
+        } catch (discountError) {
+          console.error('Failed to create discount code:', discountError);
         }
       }
       
@@ -409,13 +422,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/discount-codes/:code/use", async (req, res) => {
     try {
-      const code = await storage.useDiscountCode(req.params.code);
-      if (!code) {
+      const schema = z.object({
+        amountUsed: z.string().refine((val) => {
+          const num = parseFloat(val);
+          return !isNaN(num) && num > 0;
+        }, { message: "Amount used must be a positive number" }),
+      });
+      
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        const error = fromZodError(parsed.error);
+        return res.status(400).json({ error: error.message });
+      }
+      
+      const result = await storage.useDiscountCode(req.params.code, parsed.data.amountUsed);
+      
+      if (!result.wasFound) {
         return res.status(404).json({ error: "Discount code not found" });
       }
-      res.json(code);
+      
+      if (result.error) {
+        return res.status(400).json({ error: result.error });
+      }
+      
+      res.json({ 
+        success: true, 
+        remainingCredit: result.updated,
+        fullyUsed: result.wasDeleted 
+      });
     } catch (error) {
       res.status(500).json({ error: "Failed to use discount code" });
+    }
+  });
+
+  app.delete("/api/discount-codes/:id", async (req, res) => {
+    try {
+      const success = await storage.deleteDiscountCode(req.params.id);
+      if (!success) {
+        return res.status(404).json({ error: "Discount code not found" });
+      }
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Failed to delete discount code" });
     }
   });
 
@@ -436,6 +484,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error('Invoice generation error:', error);
       res.status(500).json({ error: "Failed to generate invoice" });
+    }
+  });
+
+  // Return invoice generation
+  app.get("/api/returns/:id/invoice", async (req, res) => {
+    try {
+      const returnData = await storage.getReturn(req.params.id);
+      if (!returnData) {
+        return res.status(404).json({ error: "Return not found" });
+      }
+
+      const order = await storage.getOrder(returnData.orderId);
+      if (!order) {
+        return res.status(404).json({ error: "Original order not found" });
+      }
+
+      const { pdfService } = await import('./pdf-service');
+      const pdfBuffer = await pdfService.generateReturnInvoice(returnData, order);
+      
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="return-invoice-${returnData.returnNumber}.pdf"`);
+      res.send(pdfBuffer);
+    } catch (error) {
+      console.error('Return invoice generation error:', error);
+      res.status(500).json({ error: "Failed to generate return invoice" });
     }
   });
 
